@@ -1,6 +1,6 @@
 {
   "name": "strapi-plugin-image-optimizer",
-  "version": "2.2.1",
+  "version": "3.0.0",
   "description": "Optimize your images for desktop, tablet and mobile and different image formats.",
   "homepage": "https://github.com/marlokessler/strapi-plugin-image-optimizer#readme",
   "license": "MIT",
@@ -19,11 +19,11 @@
     "url": "https://github.com/marlokessler/strapi-plugin-image-optimizer/issues"
   },
   "author": {
-    "name": "Marlo Kessler (https://github.com/marlokessler)"
+    "name": "loc4atnt"
   },
   "maintainers": [
     {
-      "name": "Marlo Kessler (https://github.com/marlokessler)"
+      "name": "loc4atnt"
     }
   ],
   "keywords": [
@@ -47,8 +47,15 @@
     ]
   },
   "engines": {
-    "node": ">=18.0.0 <=20.x.x",
+    "node": ">=18.0.0",
     "npm": ">=6.0.0"
+  },
+  "dependencies": {
+    "@jsquash/avif": "^2.0.0",
+    "@jsquash/jpeg": "^1.0.0",
+    "@jsquash/jxl": "^1.0.0",
+    "@jsquash/oxipng": "^2.0.0",
+    "@jsquash/webp": "^1.0.0"
   },
   "devDependencies": {
     "@strapi/typescript-utils": "^4.20.5",
@@ -57,8 +64,9 @@
   },
   "peerDependencies": {
     "@strapi/core": "*",
-    "@strapi/strapi": "^4.20.5",
-    "@strapi/utils": "^4.20.5",
+    "@strapi/strapi": "^4.20.5 || ^5.0.0",
+    "@strapi/utils": "^4.20.5 || ^5.0.0",
+    "sharp": "*",
     "yup": "^1.4.0"
   },
   "scripts": {

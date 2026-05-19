@@ -1,194 +1,160 @@
-import { ReadStream, createReadStream, createWriteStream } from "fs";
+import { createReadStream } from "fs";
+import { writeFile } from "fs/promises";
+import { createRequire } from "module";
 import { join } from "path";
-import sharp, { Sharp, Metadata } from "sharp";
-import { file as fileUtils } from '@strapi/utils';
 
-// @ts-ignore - No types available
-import pluginUpload from "@strapi/plugin-upload/strapi-server";
-const imageManipulation = pluginUpload().services["image-manipulation"];
+import { file as fileUtils } from "@strapi/utils";
+
+// Strapi v5 ships the upload plugin as `@strapi/upload`; v4 uses
+// `@strapi/plugin-upload`. The two also differ in how the image-manipulation
+// service is exposed: v4 exports a factory, v5 exports the service object
+// directly. Normalise both into a `() => serviceObject` factory.
+//
+// When this plugin is consumed via `npm install file:...` (or yarn link), the
+// plugin lives outside the consumer's project tree, so its own `require` can't
+// resolve `@strapi/*`. Build a require rooted at the consumer (require.main =
+// the strapi CLI entry inside the consumer's node_modules) and fall back to
+// our own require for the rare case main isn't set (tests, REPL).
+function loadImageManipulation(): () => Record<string, unknown> {
+  const candidates: NodeRequire[] = [];
+  const mainFile = require.main?.filename;
+  if (mainFile) {
+    try {
+      candidates.push(createRequire(mainFile));
+    } catch {}
+  }
+  try {
+    candidates.push(createRequire(join(process.cwd(), "package.json")));
+  } catch {}
+  candidates.push(require);
+
+  let pluginUpload: any;
+  let lastErr: unknown;
+  outer: for (const r of candidates) {
+    for (const id of [
+      "@strapi/upload/strapi-server",
+      "@strapi/plugin-upload/strapi-server",
+    ]) {
+      try {
+        pluginUpload = r(id);
+        break outer;
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+  }
+  if (!pluginUpload) {
+    throw new Error(
+      `[strapi-plugin-image-optimizer] Could not locate the upload plugin. ` +
+        `Tried @strapi/upload and @strapi/plugin-upload from ${candidates.length} require roots. ` +
+        `Last error: ${(lastErr as Error)?.message ?? lastErr}`
+    );
+  }
+  pluginUpload = pluginUpload?.default ?? pluginUpload;
+  const svc = pluginUpload().services["image-manipulation"];
+  return typeof svc === "function" ? svc : () => svc;
+}
+const imageManipulation = loadImageManipulation();
 
 import {
-  OutputFormat,
-  ImageSize,
+  CompressOptions,
+  Config,
   File,
+  ImageSize,
+  OutputFormat,
+  OutputFormatConfig,
   SourceFile,
-  StrapiImageFormat,
   SourceFormat,
+  StrapiImageFormat,
 } from "../models";
+import { encodeOriginal, encodeRgba } from "./encoders";
+import { resizeToRaw } from "./resize";
 import settingsService from "./settings-service";
 
-const defaultFormats: OutputFormat[] = ["original", "webp", "avif"];
-const defaultInclude: SourceFormat[] = ["jpeg", "jpg", "png"];
-const defaultQuality = 80;
+const DEFAULT_FORMATS: OutputFormatConfig[] = [{ format: "avif" }];
+const DEFAULT_INCLUDE: SourceFormat[] = ["jpeg", "jpg", "png"];
+const DEFAULT_COMPRESS: Required<CompressOptions> = {
+  quality: 85,
+  lossless: false,
+  effort: 4,
+  subsample: "4:4:4",
+  tune: "ssim",
+};
 
 async function optimizeImage(file: SourceFile): Promise<StrapiImageFormat[]> {
-  // Get config
   const {
     exclude = [],
-    formats = defaultFormats,
-    include = defaultInclude,
+    formats = DEFAULT_FORMATS,
+    include = DEFAULT_INCLUDE,
     sizes,
     additionalResolutions,
-    quality = defaultQuality,
-  } = settingsService.settings;
+    compress: globalCompress,
+  } = settingsService.settings as Config;
 
-  const sourceFileType = file.ext.replace(".", "");
-  if (
-    exclude.includes(sourceFileType.toLowerCase() as SourceFormat) ||
-    !include.includes(sourceFileType.toLowerCase() as SourceFormat)
-  ) {
-    return Promise.all([]);
+  const sourceFileType = file.ext.replace(".", "").toLowerCase() as SourceFormat;
+  if (exclude.includes(sourceFileType) || !include.includes(sourceFileType)) {
+    return [];
   }
 
-  const imageFormatPromises: Promise<StrapiImageFormat>[] = [];
-
-  formats.forEach((format) => {
-    sizes.forEach((size) => {
-      imageFormatPromises.push(generateImage(file, format, size, quality));
+  const promises: Promise<StrapiImageFormat>[] = [];
+  for (const formatConfig of formats) {
+    const effectiveCompress: CompressOptions = {
+      ...DEFAULT_COMPRESS,
+      ...globalCompress,
+      ...formatConfig.compress,
+    };
+    for (const size of sizes) {
+      promises.push(generateImage(file, formatConfig.format, size, effectiveCompress));
       if (additionalResolutions) {
-        additionalResolutions.forEach((resizeFactor) => {
-          imageFormatPromises.push(
-            generateImage(file, format, size, quality, resizeFactor)
+        for (const factor of additionalResolutions) {
+          promises.push(
+            generateImage(file, formatConfig.format, size, effectiveCompress, factor)
           );
-        });
+        }
       }
-    });
-  });
-
-  return Promise.all(imageFormatPromises);
+    }
+  }
+  return Promise.all(promises);
 }
 
 async function generateImage(
   sourceFile: SourceFile,
   format: OutputFormat,
   size: ImageSize,
-  quality: number,
+  compress: CompressOptions,
   resizeFactor = 1
 ): Promise<StrapiImageFormat> {
-  const resizeFactorPart = resizeFactor === 1 ? "" : `_${resizeFactor}x`;
-  const sizeName = `${size.name}${resizeFactorPart}`;
+  const sizePart = resizeFactor === 1 ? size.name : `${size.name}_${resizeFactor}x`;
   const formatPart = format === "original" ? "" : `_${format}`;
-  return {
-    key: `${sizeName}${formatPart}`,
-    file: await resizeFileTo(
-      sourceFile,
-      sizeName,
-      format,
-      size,
-      quality,
-      resizeFactor
-    ),
-  };
-}
+  const key = `${sizePart}${formatPart}`;
 
-async function resizeFileTo(
-  sourceFile: SourceFile,
-  sizeName: string,
-  format: OutputFormat,
-  size: ImageSize,
-  quality: number,
-  resizeFactor: number
-): Promise<File> {
-  let sharpInstance = sharp();
-  if (format !== "original") {
-    sharpInstance = sharpInstance.toFormat(format);
-  }
-  sharpInstance = sharpAddFormatSettings(sharpInstance, { quality });
-  sharpInstance = sharpAddResizeSettings(
-    sharpInstance,
-    size,
-    resizeFactor,
-    sourceFile
-  );
+  const result =
+    format === "original"
+      ? await encodeOriginal(sourceFile, size, resizeFactor, compress)
+      : await encodeRgba(format, await resizeToRaw(sourceFile, size, resizeFactor), compress);
 
-  const imageHash = `${sizeName}_${format}_${sourceFile.hash}`;
+  const imageHash = `${key}_${sourceFile.hash}`;
   const filePath = join(sourceFile.tmpWorkingDirectory, imageHash);
-  const newImageStream = sourceFile.getStream().pipe(sharpInstance);
-  await writeStreamToFile(newImageStream, filePath);
+  await writeFile(filePath, result.buffer);
 
-  const metadata = await getMetadata(createReadStream(filePath));
-  return {
-    name: getFileName(sourceFile, sizeName),
+  const file: File = {
+    name: buildFileName(sourceFile, sizePart),
     hash: imageHash,
-    ext: getFileExtension(sourceFile, format),
-    mime: getFileMimeType(sourceFile, format),
+    ext: result.ext,
+    mime: result.mime,
     path: sourceFile.path,
-    width: metadata.width,
-    height: metadata.height,
-    size: metadata.size && fileUtils.bytesToKbytes(metadata.size),
+    width: result.width,
+    height: result.height,
+    size: fileUtils.bytesToKbytes(result.buffer.byteLength),
     getStream: () => createReadStream(filePath),
   };
+
+  return { key, file };
 }
 
-function sharpAddFormatSettings(
-  sharpInstance: Sharp,
-  { quality }: { quality?: number }
-): Sharp {
-  // TODO: Add jxl when it's no longer experimental
-  return sharpInstance
-    .jpeg({ quality, progressive: true, force: false })
-    .png({
-      compressionLevel: Math.floor(((quality ?? 100) / 100) * 9),
-      progressive: true,
-      force: false,
-    })
-    .webp({ quality, force: false })
-    .avif({ quality, force: false })
-    .heif({ quality, force: false })
-    .tiff({ quality, force: false });
-}
-
-function sharpAddResizeSettings(
-  sharpInstance: Sharp,
-  size: ImageSize,
-  factor: number,
-  sourceFile: SourceFile
-): Sharp {
-  const originalSize = !size.width && !size.height;
-  const { width, height } = originalSize
-    ? { width: sourceFile.width, height: sourceFile.height }
-    : { width: size.width, height: size.height };
-
-  return sharpInstance.resize({
-    width: width ? width * factor : undefined,
-    height: height ? height * factor : undefined,
-    fit: size.fit,
-    // Position "center" cannot be set since it's the default (see: https://sharp.pixelplumbing.com/api-resize#resize).
-    position: size.position === "center" ? undefined : size.position,
-    withoutEnlargement: size.withoutEnlargement,
-  });
-}
-
-async function writeStreamToFile(sharpsStream: Sharp, path: string) {
-  return new Promise((resolve, reject) => {
-    const writeStream = createWriteStream(path);
-    // Reject promise if there is an error with the provided stream
-    sharpsStream.on("error", reject);
-    sharpsStream.pipe(writeStream);
-    writeStream.on("close", resolve);
-    writeStream.on("error", reject);
-  });
-}
-
-async function getMetadata(readStream: ReadStream): Promise<Metadata> {
-  return new Promise((resolve, reject) => {
-    const sharpInstance = sharp();
-    sharpInstance.metadata().then(resolve).catch(reject);
-    readStream.pipe(sharpInstance);
-  });
-}
-
-function getFileName(sourceFile: File, sizeName: string) {
-  const fileNameWithoutExtension = sourceFile.name.replace(/\.[^\/.]+$/, "");
-  return `${sizeName}_${fileNameWithoutExtension}`;
-}
-
-function getFileExtension(sourceFile: File, format: OutputFormat) {
-  return format === "original" ? sourceFile.ext : `.${format}`;
-}
-
-function getFileMimeType(sourceFile: File, format: OutputFormat) {
-  return format === "original" ? sourceFile.mime : `image/${format}`;
+function buildFileName(sourceFile: File, sizeName: string): string {
+  const stem = sourceFile.name.replace(/\.[^./]+$/, "");
+  return `${sizeName}_${stem}`;
 }
 
 export default () => ({

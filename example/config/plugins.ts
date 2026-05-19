@@ -4,7 +4,20 @@ export default ({ env }) => ({
     config: {
       include: ["jpeg", "jpg", "png"],
       exclude: ["gif"],
-      formats: ["original", "webp", "avif"],
+      formats: [
+        {
+          format: "avif",
+          compress: {
+            quality: 85,
+            lossless: false,
+            effort: 4,
+            subsample: "4:4:4",
+            tune: "ssim",
+          },
+        },
+        { format: "webp" },
+        { format: "original" },
+      ],
       sizes: [
         {
           name: "xs",
@@ -34,7 +47,11 @@ export default ({ env }) => ({
         },
       ],
       additionalResolutions: [1.5, 2],
-      quality: 70,
+      compress: {
+        quality: 75,
+        lossless: false,
+        effort: 4,
+      },
     },
   },
 });

@@ -3,7 +3,13 @@
   "compilerOptions": {
     "outDir": "dist",
     "rootDir": ".",
-    "declaration": true
+    "declaration": true,
+    // Override base "module: CommonJS" so `await import('@jsquash/*')` is preserved
+    // as a real dynamic import. The `@jsquash/*` packages are pure ESM and
+    // require()-ing them throws ERR_REQUIRE_ESM at runtime.
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "target": "ES2022"
   },
   "include": [
     // Include the root directory

@@ -4,25 +4,59 @@ export interface Config {
    */
   additionalResolutions?: number[];
   /**
-   * The image formats to exclude. Exclude takes precedence over include. Default is [].
+   * The source image formats to exclude. Exclude takes precedence over include. Default is [].
    */
   exclude?: SourceFormat[];
   /**
-   * The image formats to generate. Default is ["original", "webp", "avif"].
-   */
-  formats?: OutputFormat[];
-  /**
-   * The image formats to include. Exclude takes precedence over include. Default is ["jpeg", "jpg", "png"].
+   * The source image formats to include. Exclude takes precedence over include. Default is ["jpeg", "jpg", "png"].
    */
   include?: SourceFormat[];
   /**
-   * The image sizes to generate. Default is [].
+   * The image sizes to generate.
    */
   sizes: ImageSize[];
   /**
-   * The quality of the generated images. Default is 80.
+   * The output image formats to generate. Default is [{ format: "avif" }].
+   */
+  formats?: OutputFormatConfig[];
+  /**
+   * Default compress options applied to every output format. Per-format `compress` overrides any matching key here.
+   */
+  compress?: CompressOptions;
+}
+
+export interface OutputFormatConfig {
+  /**
+   * The output format. "original" re-encodes in the source format without conversion.
+   */
+  format: OutputFormat;
+  /**
+   * Per-format compress options. Merged on top of the global `compress` and the built-in defaults.
+   */
+  compress?: CompressOptions;
+}
+
+export interface CompressOptions {
+  /**
+   * Encoding quality, 0-100. Higher = better quality + larger file. Ignored for `png` (oxipng is lossless) and `original`.
    */
   quality?: number;
+  /**
+   * If true, encode losslessly (where the codec supports it). Default false. Ignored for `png` (always lossless).
+   */
+  lossless?: boolean;
+  /**
+   * Encoding effort, 0-10. Higher = slower + smaller. Mapped to each codec's native parameter (AVIF speed, WebP method, oxipng level, JXL effort). Ignored for `jpeg`/`jpg`.
+   */
+  effort?: number;
+  /**
+   * Chroma subsampling. AVIF and JPEG only — ignored for other codecs.
+   */
+  subsample?: "4:2:0" | "4:2:2" | "4:4:4";
+  /**
+   * AVIF tuning metric. AVIF only — ignored for other codecs.
+   */
+  tune?: "auto" | "psnr" | "ssim";
 }
 
 export interface ImageSize {
@@ -75,7 +109,14 @@ export type SourceFormat =
   | "v"
   | "webp";
 
-export type OutputFormat = "original" | SourceFormat;
+export type OutputFormat =
+  | "original"
+  | "avif"
+  | "webp"
+  | "jpeg"
+  | "jpg"
+  | "png"
+  | "jxl";
 
 export type ImageFit = "contain" | "cover" | "fill" | "inside" | "outside";
 

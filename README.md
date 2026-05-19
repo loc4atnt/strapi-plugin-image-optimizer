@@ -23,6 +23,7 @@ Marlo
 
 ## Table of contents
 
+- [Breaking changes in v3](#breaking-changes-in-v3)
 - [Requirements](#requirements)
 - [Installation](#installation)
   - [1. Install package](#1-install-package)
@@ -30,6 +31,8 @@ Marlo
   - [3. Add config options](#3-add-config-options)
 - [Config options](#config-options)
   - [Object `Config`](#object-config)
+  - [Object `OutputFormatConfig`](#object-outputformatconfig)
+  - [Object `CompressOptions`](#object-compressoptions)
   - [Object `ImageSize`](#object-imagesize)
   - [Type `SourceFormat`](#type-sourceformat)
   - [Type `OutputFormat`](#type-outputformat)
@@ -40,13 +43,27 @@ Marlo
 - [Found a bug?](#found-a-bug)
 - [Contributors](#contributors-)
 
+## Breaking changes in v3
+
+v3 swaps the encoding backend from sharp to [jSquash](https://github.com/jamsinclair/jSquash) (the WASM ports of Google Squoosh's codecs). Sharp is still used for resizing, since jSquash has no fit-mode resize.
+
+What changed:
+
+- **`quality: number`** at the top level of `config` is **removed**. Use `compress: { quality, ... }` (global default) and/or per-format `formats: [{ format, compress: {...} }]` instead. Old configs will fail validation.
+- **`formats`** changed from `string[]` (e.g. `["original", "avif"]`) to `OutputFormatConfig[]` (e.g. `[{ format: "avif", compress: {...} }]`).
+- **`OutputFormat`** is narrower: `"original" | "avif" | "webp" | "jpeg" | "jpg" | "png" | "jxl"`. The other sharp formats (`heif`, `tiff`, `gif`, `svg`, `dz`, etc.) were dropped because jSquash does not encode them. They are still allowed in `SourceFormat` for include/exclude filtering.
+- New per-codec controls: `lossless`, `effort`, `subsample` (AVIF/JPEG), `tune` (AVIF). Defaults match Squoosh's app: `quality: 85`, `lossless: false`, `effort: 4`, `subsample: "4:4:4"`, `tune: "ssim"`. Default formats: `[{ format: "avif" }]`.
+- Node engine widened to `>=18.0.0` (was capped at `<=20.x.x`).
+
 ## Requirements
 
-Strapi version >= v4.11.7
+Strapi version >= v4.11.7. Node 18+.
 
 ## Note
 
-This plugin uses [sharp](https://sharp.pixelplumbing.com/) provided via [strapi core](https://github.com/strapi/strapi/blob/3bfe1c913cf037c85a167f83a4bda0d848c9ba50/packages/core/upload/package.json#L52). All settings and options are documented in more detail in the [sharp API documentation](https://sharp.pixelplumbing.com/api-resize).
+v3 uses [jSquash](https://github.com/jamsinclair/jSquash) (the WASM ports of Google Squoosh's codecs) for encoding and [sharp](https://sharp.pixelplumbing.com/) for resizing. Sharp is declared as a `peerDependency` and is satisfied transitively by Strapi's upload plugin. Resize options (`fit`, `position`, `withoutEnlargement`) follow sharp's [resize API](https://sharp.pixelplumbing.com/api-resize). Encode options follow each jSquash codec's defaults.
+
+Animated source images (animated GIF/WebP) are encoded as a single still frame — sharp decodes only the first frame by default, and jSquash's encoders are still-image only.
 
 ## Installation
 
@@ -77,14 +94,37 @@ Configure the plugin in the `config/plugins.(js/ts)` file of your Strapi project
 
 ### Object `Config`
 
-| Option                  | Type                                     | Description                                                                                                                                                                                                                                             |
-| ----------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `additionalResolutions` | `number[]` <br/> Min: 0                  | Create additional resolutions for high res displays (e.g. Apples Retina Display which has a resolution of 2x). Default is `[]`.                                                                                                                         |
-| `exclude`               | [`SourceFormat`](#type-sourceformat)`[]` | Exclude image formats from being optimized. Default is `[]`.                                                                                                                                                                                            |
-| `formats`               | [`OutputFormat`](#type-outputformat)`[]` | Specifiy the formats images should be transformed to. Specifiying `original` means that the original format is kept. Default is `["original", "webp", "avif"]`. Only `jpeg`, `jpg`, `png`/`webp`, `avif`, `heif`, `tiff` and `tif` will adjust quality. |
-| `include`               | [`SourceFormat`](#type-sourceformat)`[]` | Include image formats that should be optimized. Default is `["jpeg", "jpg", "png"]`.                                                                                                                                                                    |
-| `sizes`<sup>\*</sup>    | [`ImageSize`](#object-imagesize)`[]`     | (required) - Specify the sizes to which the uploaded image should be transformed.                                                                                                                                                                       |
-| `quality`               | `number` <br/> Min: 0 <br/> Max: 100     | Specific the image quality the output should be rendered in. Default is `80`.                                                                                                                                                                           |
+| Option                  | Type                                                       | Description                                                                                                                                       |
+| ----------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `additionalResolutions` | `number[]`                                                 | Extra resolution multipliers (e.g. `[1.5, 2]` for retina). Default is `[]`.                                                                       |
+| `compress`              | [`CompressOptions`](#object-compressoptions)               | Default compress settings merged into every output format. Per-format `compress` overrides any matching key here. See defaults below.             |
+| `exclude`               | [`SourceFormat`](#type-sourceformat)`[]`                   | Source formats to skip. Takes precedence over `include`. Default is `[]`.                                                                         |
+| `formats`               | [`OutputFormatConfig`](#object-outputformatconfig)`[]`     | Output formats to generate, with optional per-format compress. Default is `[{ format: "avif" }]`.                                                 |
+| `include`               | [`SourceFormat`](#type-sourceformat)`[]`                   | Source formats to optimize. Default is `["jpeg", "jpg", "png"]`.                                                                                  |
+| `sizes`<sup>\*</sup>    | [`ImageSize`](#object-imagesize)`[]`                       | (required) - Sizes to which the uploaded image should be resized.                                                                                 |
+
+### Object `OutputFormatConfig`
+
+| Option                  | Type                                              | Description                                                                                                                       |
+| ----------------------- | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `format`<sup>\*</sup>   | [`OutputFormat`](#type-outputformat)              | (required) - The output format. `"original"` re-encodes in the source format without conversion.                                  |
+| `compress`              | [`CompressOptions`](#object-compressoptions)      | Compress settings for this format. Merged on top of the global `compress` and the built-in defaults.                              |
+
+### Object `CompressOptions`
+
+Effective options per format are resolved as `{ ...defaults, ...config.compress, ...formatConfig.compress }`. Built-in defaults match Squoosh's UI:
+
+```
+quality: 85, lossless: false, effort: 4, subsample: "4:4:4", tune: "ssim"
+```
+
+| Option       | Type                                  | Applies to              | Description                                                                                                                                  |
+| ------------ | ------------------------------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `quality`    | `number` <br/> 0-100                  | AVIF, WebP, JPEG, JXL   | Encoding quality. Higher = better quality, larger file. Ignored for `png` (lossless) and `original` (uses sharp's source-format settings).    |
+| `lossless`   | `boolean`                             | AVIF, WebP, JXL         | If `true`, encode losslessly. Ignored for codecs that don't support it.                                                                       |
+| `effort`     | `number` <br/> 0-10                   | AVIF, WebP, PNG, JXL    | Encoding effort. Higher = slower, smaller. Mapped to AVIF `speed`, WebP `method`, oxipng `level`, JXL `effort` per codec. Ignored for JPEG.   |
+| `subsample`  | `"4:2:0" \| "4:2:2" \| "4:4:4"`       | AVIF, JPEG              | Chroma subsampling. Ignored for other codecs.                                                                                                |
+| `tune`       | `"auto" \| "psnr" \| "ssim"`          | AVIF                    | AVIF tuning metric. Ignored for other codecs.                                                                                                |
 
 ### Object `ImageSize`
 
@@ -127,8 +167,17 @@ type SourceFormat =
 ### Type `OutputFormat`
 
 ```typescript
-type OutputFormat = "original" | SourceFormat;
+type OutputFormat =
+  | "original"
+  | "avif"
+  | "webp"
+  | "jpeg"
+  | "jpg"
+  | "png"
+  | "jxl";
 ```
+
+Narrower than `SourceFormat` because jSquash only encodes these formats. `heif`, `tiff`, `gif`, `svg`, etc. were dropped from output in v3.
 
 ### Type `ImageFit`
 
@@ -139,7 +188,7 @@ type ImageFit = "contain" | "cover" | "fill" | "inside" | "outside";
 ### Type `ImagePosition`
 
 ```typescript
-type ImageFit =
+type ImagePosition =
   | "top"
   | "right top"
   | "right"
@@ -155,7 +204,7 @@ type ImageFit =
 
 ### Example config
 
-The following config would be a good starting point for your project.
+The following config is a good starting point for your project.
 
 ```typescript
 // ./config/plugins.ts
@@ -167,24 +216,25 @@ export default ({ env }) => ({
     config: {
       include: ["jpeg", "jpg", "png"],
       exclude: ["gif"],
-      formats: ["original", "webp", "avif"],
+      formats: [
+        {
+          format: "avif",
+          compress: {
+            quality: 85,
+            lossless: false,
+            effort: 4,
+            subsample: "4:4:4",
+            tune: "ssim",
+          },
+        },
+        { format: "webp" },        // uses global compress + defaults
+        { format: "original" },     // re-encodes in source format
+      ],
       sizes: [
-        {
-          name: "xs",
-          width: 300,
-        },
-        {
-          name: "sm",
-          width: 768,
-        },
-        {
-          name: "md",
-          width: 1280,
-        },
-        {
-          name: "lg",
-          width: 1920,
-        },
+        { name: "xs", width: 300 },
+        { name: "sm", width: 768 },
+        { name: "md", width: 1280 },
+        { name: "lg", width: 1920 },
         {
           name: "xl",
           width: 2840,
@@ -196,8 +246,15 @@ export default ({ env }) => ({
           name: "original",
         },
       ],
-      additionalResolutions: [1.5, 3],
-      quality: 70,
+      additionalResolutions: [1.5, 2],
+      // Global compress — merged into every format's options. Per-format
+      // `compress` (above) overrides any matching key. Built-in defaults
+      // already match Squoosh, so omitting this is fine.
+      compress: {
+        quality: 75,
+        lossless: false,
+        effort: 4,
+      },
     },
   },
   // ...
