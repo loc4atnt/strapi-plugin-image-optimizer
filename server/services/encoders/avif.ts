@@ -1,74 +1,39 @@
-import { readFile } from "fs/promises";
-import path from "path";
+import sharp from "sharp";
 import { CompressOptions } from "../../models";
 import { RawImage } from "./types";
 
-// jSquash's Emscripten codec tries to fetch its `.wasm` via `import.meta.url`,
-// which is polyfilled to `https://localhost` under Node and fails with
-// `TypeError: fetch failed`. Pre-load the binary and hand it to `init` instead.
-let modPromise: Promise<any> | null = null;
-function getModule() {
-  if (!modPromise) {
-    modPromise = (async () => {
-      // The package's index.js only re-exports `encode` (default), not `init`.
-      // Import the encode entry directly so we can call `init` ourselves.
-      const mod: any = await import("@jsquash/avif/encode.js");
-      const pkgRoot = path.dirname(
-        require.resolve("@jsquash/avif/package.json")
-      );
-      const wasmBinary = await readFile(
-        path.join(pkgRoot, "codec/enc/avif_enc.wasm")
-      );
-      await mod.init(undefined, { wasmBinary });
-      return mod;
-    })();
-  }
-  return modPromise;
-}
-
+// AVIF is encoded with sharp's native libvips/libaom encoder instead of the
+// @jsquash/avif WASM codec. The WASM encoder is single-threaded and runs
+// synchronously on the Node event loop, so a full-resolution upload could spend
+// minutes encoding and FREEZE the whole Strapi server for that entire duration
+// (e.g. POST /upload (217898 ms)). sharp produces an equivalent file at the
+// same quality settings, far faster, and runs in libvips' threadpool, so it
+// never blocks the event loop.
+//
+// `image` is the already-resized sRGB RGBA buffer produced by `resizeToRaw`, so
+// we hand it to sharp as raw pixel data and only run the encode step here.
 export async function encodeAvif(
   image: RawImage,
   options: CompressOptions
 ): Promise<Buffer> {
-  const mod = await getModule();
-  const result: ArrayBuffer = await mod.default(image, mapOptions(options));
-  return Buffer.from(result);
+  const { data, width, height } = image;
+  const raw = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+  return sharp(raw, { raw: { width, height, channels: 4 } })
+    .avif({
+      quality: options.quality ?? 85,
+      lossless: options.lossless ?? false,
+      // sharp's effort is 0-9 (higher = slower/smaller); clamp to keep it valid.
+      effort: clamp(options.effort ?? 4, 0, 9),
+      chromaSubsampling: mapSubsample(options.subsample),
+    })
+    .toBuffer();
 }
 
-function mapOptions(opts: CompressOptions) {
-  return {
-    quality: opts.quality ?? 85,
-    qualityAlpha: -1,
-    speed: clamp(opts.effort ?? 4, 0, 10),
-    subsample: subsampleToInt(opts.subsample),
-    tune: tuneToInt(opts.tune),
-    lossless: opts.lossless ?? false,
-  };
-}
-
-function subsampleToInt(s: CompressOptions["subsample"]): number {
-  switch (s) {
-    case "4:2:0":
-      return 0;
-    case "4:2:2":
-      return 1;
-    case "4:4:4":
-      return 2;
-    default:
-      return 2;
-  }
-}
-
-function tuneToInt(t: CompressOptions["tune"]): number {
-  switch (t) {
-    case "psnr":
-      return 1;
-    case "ssim":
-      return 2;
-    case "auto":
-    default:
-      return 0;
-  }
+// sharp's AVIF only supports 4:4:4 and 4:2:0; collapse anything chroma-subsampled
+// (e.g. 4:2:2) to 4:2:0 and keep 4:4:4 as-is. `tune` has no sharp equivalent and
+// is intentionally dropped — the quality target (quality + subsampling) is kept.
+function mapSubsample(s: CompressOptions["subsample"]): "4:4:4" | "4:2:0" {
+  return s === "4:4:4" ? "4:4:4" : "4:2:0";
 }
 
 function clamp(n: number, min: number, max: number): number {
